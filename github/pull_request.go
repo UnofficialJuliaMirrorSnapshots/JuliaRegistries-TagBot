@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/google/go-github/v25/github"
@@ -22,20 +23,24 @@ var (
 	ErrVersionMatch   = errors.New("No version regex match")
 	ErrCommitMatch    = errors.New("No commit regex match")
 	ErrNoAuthHeader   = errors.New("Authentication header was not set")
+	ErrNoCommits      = errors.New("No commits were found")
+	ErrNotEnoughTags  = errors.New("Not enough tags were found")
+	ErrNoVersion      = errors.New("Version was not found in Project.toml")
 
-	RepoRegex       = regexp.MustCompile(`Repository:.*github.com/(.*)/(.*)`)
-	VersionRegex    = regexp.MustCompile(`Version:\s*(v.*)`)
-	CommitRegex     = regexp.MustCompile(`Commit:\s*(.*)`)
-	PatchNotesRegex = regexp.MustCompile(`(?s)<!-- BEGIN PATCH NOTES -->(.*)<!-- END PATCH NOTES -->`)
+	RepoRegex         = regexp.MustCompile(`Repository:.*github.com/(.*)/(.*)`)
+	VersionRegex      = regexp.MustCompile(`Version:\s*(v.*)`)
+	CommitRegex       = regexp.MustCompile(`Commit:\s*(.*)`)
+	ReleaseNotesRegex = regexp.MustCompile(`(?s)<!-- BEGIN (?:PATCH|RELEASE) NOTES -->(.*)<!-- END (?:PATCH|RELEASE) NOTES -->`)
+	MergedPRRegex     = regexp.MustCompile(`Merge pull request #(\d+)`)
 )
 
 // ReleaseInfo contains the information needed to create a GitHub release.
 type ReleaseInfo struct {
-	Owner      string
-	Name       string
-	Version    string
-	Commit     string
-	PatchNotes string
+	Owner        string
+	Name         string
+	Version      string
+	Commit       string
+	ReleaseNotes string
 }
 
 // HandlePullRequest handles a pull request event.
@@ -131,18 +136,25 @@ func ParseBody(body string) ReleaseInfo {
 	commit := match[1]
 
 	// This one is optional, and just defaults to no notes.
-	match = PatchNotesRegex.FindStringSubmatch(body)
+	match = ReleaseNotesRegex.FindStringSubmatch(body)
 	var notes string
 	if match != nil {
 		notes = strings.TrimSpace(match[1])
+		lines := strings.Split(notes, "\n")
+		if strings.HasPrefix(lines[0], "> ") {
+			for i, l := range lines {
+				lines[i] = strings.TrimSpace(l[1:])
+			}
+			notes = strings.Join(lines, "\n")
+		}
 	}
 
 	return ReleaseInfo{
-		Owner:      owner,
-		Name:       name,
-		Version:    version,
-		Commit:     commit,
-		PatchNotes: notes,
+		Owner:        owner,
+		Name:         name,
+		Version:      version,
+		Commit:       commit,
+		ReleaseNotes: notes,
 	}
 }
 
@@ -169,7 +181,14 @@ func (ri ReleaseInfo) CreateTag(auth string) error {
 	}
 
 	// Create and push the tag.
-	if err = DoCmd("git", "-C", dir, "tag", ri.Version, "-s", "-m", ri.PatchNotes); err != nil {
+	msg := ri.ReleaseNotes
+	if msg == "" {
+		msg = fmt.Sprintf(
+			"See https://github.com/%s/%s/releases/tag/%s for release notes",
+			ri.Owner, ri.Name, ri.Version,
+		)
+	}
+	if err = DoCmd("git", "-C", dir, "tag", ri.Version, "-s", "-m", msg); err != nil {
 		return errors.Wrap(err, "git tag")
 	}
 	if err = DoCmd("git", "-C", dir, "push", "origin", "--tags"); err != nil {
@@ -226,7 +245,16 @@ func (ri ReleaseInfo) DoRelease(client *github.Client, pr *github.PullRequest, i
 		TagName:         github.String(ri.Version),
 		Name:            github.String(ri.Version),
 		TargetCommitish: github.String(target),
-		Body:            github.String(ri.PatchNotes),
+	}
+	if ri.ReleaseNotes == "" {
+		body, err := ri.Changelog(client)
+		if err == nil {
+			rel.Body = github.String(body)
+		} else {
+			fmt.Println("Changelog:", err)
+		}
+	} else {
+		rel.Body = github.String(ri.ReleaseNotes)
 	}
 	if rel, _, err = client.Repositories.CreateRelease(Ctx, ri.Owner, ri.Name, rel); err != nil {
 		err = errors.Wrap(err, "Creating release")
@@ -237,6 +265,95 @@ func (ri ReleaseInfo) DoRelease(client *github.Client, pr *github.PullRequest, i
 	MakeSuccessComment(pr, id, rel)
 	fmt.Printf("Created release %s for %s/%s at %s\n", ri.Version, ri.Owner, ri.Name, ri.Commit)
 	return nil
+}
+
+// Changelog generates a changelog based on commits.
+func (ri ReleaseInfo) Changelog(client *github.Client) (string, error) {
+	// Collect all the tags.
+	opts := &github.ListOptions{}
+	tags := []*github.RepositoryTag{}
+	for {
+		ts, resp, err := client.Repositories.ListTags(Ctx, ri.Owner, ri.Name, opts)
+		if err != nil {
+			return "", errors.Wrap(err, "List tags")
+		}
+
+		for _, t := range ts {
+			tags = append(tags, t)
+		}
+
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	if len(tags) == 0 {
+		return "", ErrNotEnoughTags
+	}
+
+	// Get the highest tag that is not the new release.
+	sort.Slice(tags, func(i, j int) bool {
+		return tags[i].GetName() < tags[j].GetName()
+	})
+	lastTag := tags[len(tags)-1]
+	if lastTag.GetName() == ri.Version {
+		if len(tags) < 2 {
+			return "", ErrNotEnoughTags
+		}
+		lastTag = tags[len(tags)-2]
+	}
+
+	// Collect all the commits since the previous tag.
+	commits := []*github.RepositoryCommit{}
+	cOpts := &github.CommitsListOptions{SHA: ri.Commit}
+outer:
+	for {
+		cs, resp, err := client.Repositories.ListCommits(Ctx, ri.Owner, ri.Name, cOpts)
+		if err != nil {
+			return "", errors.Wrap(err, "List commits")
+		}
+
+		for _, c := range cs {
+			if c.GetSHA() == lastTag.GetCommit().GetSHA() {
+				break outer
+			}
+			commits = append(commits, c)
+		}
+
+		if resp.NextPage == 0 {
+			break
+		}
+		cOpts.Page = resp.NextPage
+	}
+	if len(commits) == 0 {
+		return "", ErrNoCommits
+	}
+
+	// Build up the message.
+	sort.Slice(commits, func(i, j int) bool {
+		return commits[i].GetCommit().GetMessage() < commits[j].GetCommit().GetMessage()
+	})
+	body := "**Commits**\n\n"
+	prs := []string{}
+	for _, c := range commits {
+		lines := strings.Split(c.GetCommit().GetMessage(), "\n")
+		msg := strings.TrimSpace(lines[0])
+		sha := c.GetSHA()[:7]
+		if match := MergedPRRegex.FindStringSubmatch(msg); match != nil {
+			prs = append(prs, fmt.Sprintf("- #%s (%s)\n", match[1], sha))
+		} else {
+			body += fmt.Sprintf("- %s (%s)\n", msg, sha)
+		}
+	}
+	if len(prs) > 0 {
+		body += "\n**Merged PRs**\n\n"
+		for _, pr := range prs {
+			body += pr
+		}
+	}
+	body += "\nThis changelog was automatically generated, and might contain inaccuracies."
+
+	return body, nil
 }
 
 // MakeSuccessComment adds a comment to the PR indicating success.

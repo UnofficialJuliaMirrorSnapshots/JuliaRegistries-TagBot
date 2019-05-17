@@ -31,7 +31,7 @@ func makeBody(repository, version, commit, notes string) string {
 		ss = append(ss, "Commit: "+commit)
 	}
 	if notes != "" {
-		ss = append(ss, "Patch notes:", "<!-- BEGIN PATCH NOTES -->", notes, "<!-- END PATCH NOTES -->")
+		ss = append(ss, "Release notes:", "<!-- BEGIN RELEASE NOTES -->", notes, "<!-- END RELEASE NOTES -->")
 	}
 	return strings.TrimSpace(strings.Join(ss, "\n"))
 }
@@ -68,8 +68,10 @@ func TestParseBody(t *testing.T) {
 		out ReleaseInfo
 	}{
 		{makeBody("github.com/a/b", "v0.1.0", "sha", ""), ReleaseInfo{"a", "b", "v0.1.0", "sha", ""}},
-		{makeBody("https://github.com/a/b", "v0.1.0", "sha", " "), ReleaseInfo{"a", "b", "v0.1.0", "sha", ""}},
+		{makeBody("https://github.com/a/b", "v0.1.0", "sha", ""), ReleaseInfo{"a", "b", "v0.1.0", "sha", ""}},
+		{makeBody("http://github.com/a/b", "v0.1.0", "sha", " "), ReleaseInfo{"a", "b", "v0.1.0", "sha", ""}},
 		{makeBody("http://github.com/a/b", "v0.1.0", "sha", "notes"), ReleaseInfo{"a", "b", "v0.1.0", "sha", "notes"}},
+		{makeBody("http://github.com/a/b", "v0.1.0", "sha", "> foo\n> bar"), ReleaseInfo{"a", "b", "v0.1.0", "sha", "foo\nbar"}},
 	}
 
 	for i, tt := range cases {
