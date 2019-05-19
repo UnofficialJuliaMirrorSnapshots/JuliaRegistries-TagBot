@@ -30,7 +30,6 @@ const (
 
 var (
 	RegistratorUsername = os.Getenv("REGISTRATOR_USERNAME")
-	RegistryBranch      = os.Getenv("REGISTRY_BRANCH")
 	ContactUser         = os.Getenv("GITHUB_CONTACT_USER")
 	WebhookSecret       = []byte(os.Getenv("GITHUB_WEBHOOK_SECRET"))
 
@@ -101,7 +100,7 @@ func init() {
 
 func main() {
 	lambda.Start(func(lr LambdaRequest) (resp Response, nilErr error) {
-		resp = Response{StatusCode: 200}
+		resp = Response{StatusCode: http.StatusOK}
 		defer func(r *Response) {
 			fmt.Println(r.Body)
 		}(&resp)
@@ -128,10 +127,9 @@ func main() {
 		info := `
 Delivery ID: %s
 Registrator: %s
-Registry branch: %s
 Contact user: %s
 `
-		fmt.Printf(info, id, RegistratorUsername, RegistryBranch, ContactUser)
+		fmt.Printf(info, id, RegistratorUsername, ContactUser)
 
 		switch event.(type) {
 		case *github.PullRequestEvent:
@@ -168,7 +166,7 @@ func LambdaToHttp(lr LambdaRequest) (*http.Request, error) {
 func GetInstallationClient(owner, name string) (*github.Client, error) {
 	i, resp, err := AppClient.Apps.FindRepositoryInstallation(Ctx, owner, name)
 	if err != nil {
-		if resp.StatusCode == 404 {
+		if resp.StatusCode == http.StatusNotFound {
 			if _, _, err = AppClient.Apps.FindUserInstallation(Ctx, owner); err == nil {
 				return nil, ErrRepoNotEnabled
 			}
