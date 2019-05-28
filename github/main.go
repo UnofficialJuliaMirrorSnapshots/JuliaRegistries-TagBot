@@ -1,13 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -22,18 +21,12 @@ import (
 )
 
 const (
-	ActionClosed  = "closed"
-	ActionCreated = "created"
-	PemName       = "tag-bot.pem"
-	GPGDir        = "gnupg"
-	CommandPrefix = "TagBot "
-	CommandTag    = CommandPrefix + "tag"
+	PemName = "tag-bot.pem"
+	GPGDir  = "gnupg"
 )
 
 var (
-	RegistratorUsername = os.Getenv("REGISTRATOR_USERNAME")
-	ContactUser         = os.Getenv("GITHUB_CONTACT_USER")
-	WebhookSecret       = []byte(os.Getenv("GITHUB_WEBHOOK_SECRET"))
+	WebhookSecret = []byte(os.Getenv("GITHUB_WEBHOOK_SECRET"))
 
 	Ctx          = context.Background()
 	ResourcesTar = filepath.Join("github", "bin", "resources.tar")
@@ -43,15 +36,17 @@ var (
 	AppID        int
 	AppClient    *github.Client
 	SQS          *sqs.SQS
-
-	ErrRepoNotEnabled = errors.New("App is installed for user but the repository is not enabled")
 )
 
-// LambdaRequest is what we get from AWS Lambda.
-type LambdaRequest struct {
+// Request is what we get from AWS Lambda.
+type Request struct {
+	// HTTP events.
 	Method  string            `json:"httpMethod"`
 	Headers map[string]string `json:"headers"`
 	Body    string            `json:"body"`
+
+	// SQS events.
+	Records []events.SQSMessage
 }
 
 // Reponse is what we return from the handler.
@@ -110,45 +105,17 @@ func init() {
 }
 
 func main() {
-	lambda.Start(func(lr LambdaRequest) (resp Response, nilErr error) {
+	lambda.Start(func(r Request) (resp Response, nilErr error) {
 		resp = Response{StatusCode: http.StatusOK}
 		defer func(r *Response) {
 			fmt.Println(r.Body)
 		}(&resp)
 
-		req, err := LambdaToHttp(lr)
-		if err != nil {
-			resp.Body = "Converting request: " + err.Error()
-			return
-		}
-
-		payload, err := github.ValidatePayload(req, WebhookSecret)
-		if err != nil {
-			resp.Body = "Validating payload: " + err.Error()
-			return
-		}
-
-		event, err := github.ParseWebHook(github.WebHookType(req), payload)
-		if err != nil {
-			resp.Body = "Parsing payload: " + err.Error()
-			return
-		}
-
-		id := github.DeliveryID(req)
-		info := `
-Delivery ID: %s
-Registrator: %s
-Contact user: %s
-`
-		fmt.Printf(info, id, RegistratorUsername, ContactUser)
-
-		switch event.(type) {
-		case *github.PullRequestEvent:
-			err = HandlePullRequest(event.(*github.PullRequestEvent), id)
-		case *github.IssueCommentEvent:
-			err = HandleIssueComment(event.(*github.IssueCommentEvent), id)
-		default:
-			err = errors.New("Unknown event type: " + github.WebHookType(req))
+		var err error
+		if len(r.Records) == 0 {
+			err = r.HandleHTTP()
+		} else {
+			err = r.HandleSQS()
 		}
 
 		if err == nil {
@@ -161,51 +128,61 @@ Contact user: %s
 	})
 }
 
-// LambdaToHttp converts a Lambda request to an HTTP request.
-func LambdaToHttp(lr LambdaRequest) (*http.Request, error) {
-	r, err := http.NewRequest(lr.Method, "", bytes.NewBufferString(lr.Body))
+// HandleSQS handles events from SQS.
+func (r Request) HandleHTTP() error {
+	req := r.toHTTP()
+
+	payload, err := github.ValidatePayload(req, WebhookSecret)
 	if err != nil {
-		return nil, err
+		return errors.Wrap(err, "Validating payload")
 	}
-	for k, v := range lr.Headers {
-		r.Header.Add(k, v)
+
+	event, err := github.ParseWebHook(github.WebHookType(req), payload)
+	if err != nil {
+		return errors.Wrap(err, "Parsing payload")
 	}
-	return r, nil
+
+	id := github.DeliveryID(req)
+	fmt.Println("Delivery ID:", id)
+
+	switch event.(type) {
+	case *github.PullRequestEvent:
+		return HandlePullRequest(event.(*github.PullRequestEvent), id)
+	case *github.IssueCommentEvent:
+		return HandleIssueComment(event.(*github.IssueCommentEvent), id)
+	default:
+		return fmt.Errorf("Unknown event type: %s", github.WebHookType(req))
+	}
 }
 
-// GetInstallationClient returns a client that can be used to interact with an installation.
-func GetInstallationClient(owner, name string) (*github.Client, error) {
-	i, resp, err := AppClient.Apps.FindRepositoryInstallation(Ctx, owner, name)
-	if err != nil {
-		if resp.StatusCode == http.StatusNotFound {
-			if _, _, err = AppClient.Apps.FindUserInstallation(Ctx, owner); err == nil {
-				return nil, ErrRepoNotEnabled
-			}
+// HandleSQS handles events from SQS.
+func (r Request) HandleSQS() error {
+	var ret error
+
+	for _, r := range r.Records {
+		var cr ChangelogRequest
+		if err := json.Unmarshal([]byte(r.Body), &cr); err != nil {
+			ret = errors.Wrap(err, "Parsing record")
+			continue
 		}
-		return nil, err
+
+		if err := cr.Receive(); err != nil {
+			ret = err
+		}
 	}
 
-	pemFile := filepath.Join(ResourcesDir, PemName)
-	tr, err := ghinstallation.NewKeyFromFile(http.DefaultTransport, AppID, int(i.GetID()), pemFile)
-	if err != nil {
-		return nil, err
-	}
-
-	return github.NewClient(&http.Client{Transport: tr}), nil
+	return ret
 }
 
-// PreprocessBody preprocesses the PR body.
-func PreprocessBody(body string) string {
-	return strings.TrimSpace(strings.Replace(body, "\r\n", "\n", -1))
-}
-
-// DoCmd runs a shell command and prints any output.
-func DoCmd(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	b, err := cmd.CombinedOutput()
-	s := strings.TrimSpace(string(b))
-	if len(s) > 0 {
-		fmt.Println(s)
+// toHTTP converts a Lambda request to an HTTP request.
+func (r Request) toHTTP() *http.Request {
+	req := &http.Request{
+		Method: r.Method,
+		Body:   ioutil.NopCloser(strings.NewReader(r.Body)),
+		Header: make(http.Header),
 	}
-	return err
+	for k, v := range r.Headers {
+		req.Header.Add(k, v)
+	}
+	return req
 }
