@@ -1,34 +1,32 @@
 # <img src="logo.png" width="60"> Julia TagBot
 
-[![app-img]][app-link]
-[![travis-img]][travis-link]
+## Setup
 
-TagBot creates tags and releases for your Julia packages when they're registered, so that your Git tags and GitHub releases are kept in sync with releases you have made on the Julia package registry.
+Create a file at `.github/workflows/TagBot.yml` with the following contents:
 
-To install the app, click the badge above (enabling for all repositories is recommended).
-Afterwards, releases for all of your packages registered with [Registrator] will be handled automatically.
-TagBot does not handle manual registrations.
+```yml
+name: TagBot
+on:
+  schedule:
+    - cron: 0 * * * *
+jobs:
+  TagBot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v1
+      - uses: JuliaRegistries/TagBot@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+```
 
-## Usage
+No further action is required.
 
-1. Install TagBot and enable it for your package if not already done.
-2. Make a package release using [Registrator].
-3. TagBot will automatically tag a GitHub release that matches the package release you just made.
-
-### Manually Triggering a Release
-
-If you register a package before enabling TagBot, you can still have a release created retroactively.
-To trigger the release, add a comment to your merged registry PR containing the text `TagBot tag`.
-This is also useful when TagBot reports an error.
-To include the tag command in a comment without actually triggering a release, include `TagBot ignore` in your comment.
-This should be useful for registry maintainers who want to make recommendations without modifying another repository.
 
 ### Release Notes
 
-TagBot allows you to write your release notes in the same place that you trigger Registrator (see the [Registrator] README for specifics), but you don't have to if you're feeling lazy.
-When release notes are provided, they are copied into both the Git tag message and the GitHub release.
+TagBot allows you to write your release notes in the same place that you trigger Registrator (see the [Registrator](https://github.com/JuliaRegistries/Registrator.jl) README for specifics), but you don't have to if you're feeling lazy.
+When release notes are provided, they are copied into the GitHub release.
 If you do not write any notes, a changelog is automatically generated from closed issues and merged pull requests.
-This will appear in the GitHub release, and a link to that release will appear in the Git tag message.
 
 When using the automatic changelog, you can ensure that certain issues or pull requests are not included.
 These might include usage questions or typo fixes that aren't worth mentioning.
@@ -45,13 +43,27 @@ To exclude an issue or PR, add a label to it with one of the following values:
 You can spell these in a few different ways.
 For example, `no changelog` could be `nochangelog`, `no-changelog`, `no_changelog`, `No Changelog`, `NoChangelog`, `No-Changelog`, or `No_Changelog`.
 
----
+### Custom Registries
 
-For more information on what TagBot is and isn't, please see the [announcement].
+If you're using a custom registry, add the `registry` input:
 
-[app-img]: https://img.shields.io/badge/GitHub%20App-install-blue.svg
-[app-link]: https://github.com/apps/julia-tagbot
-[travis-img]: https://travis-ci.com/JuliaRegistries/TagBot.svg?branch=master
-[travis-link]: https://travis-ci.com/JuliaRegistries/TagBot
-[registrator]: https://juliaregistrator.github.io
-[announcement]: https://discourse.julialang.org/t/ann-tagbot-creates-tags-and-releases-for-your-julia-packages-when-theyre-registered/23084
+```yml
+with:
+  token: ${{ secrets.GITHUB_TOKEN }}
+  registry: MyOrg/MyRegistry
+```
+
+### Signed Tags
+
+If you want your tags to be signed with GPG, you must provide your own key.
+First, export your private key with `gpg --export-secret-keys --armor <key-id>`.
+Then, use the output to create a new repository secret called `GPG_KEY` as instructed [here](https://help.github.com/en/github/automating-your-workflow-with-github-actions/virtual-environments-for-github-actions#creating-and-using-secrets-encrypted-variables).
+Finally, add the `gpg-key` input:
+
+```yml
+with:
+  token: ${{ secrets.GITHUB_TOKEN }}
+  gpg-key: ${{ secrets.GPG_KEY }}
+```
+
+The key must not be protected by a password.

@@ -1,0 +1,20 @@
+name: Julia TagBot
+author: Chris de Graaf
+description: Creates GitHub releases for your registered Julia packages
+inputs:
+  token:
+    description: GitHub API token
+    required: true
+  registry:
+    description: Owner/name of the registry repository
+    required: false
+    default: JuliaRegistries/General
+  gpg-key:
+    description: GPG key for tag signing
+    required: false
+runs:
+  using: docker
+  image: docker://degraafc/tagbot:1
+branding:
+  icon: tag
+  color: red

@@ -1,0 +1,14 @@
+name: Publish Docker Image
+on:
+  release:
+    types: published
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v1
+      - run: $GITHUB_WORKSPACE/bin/publish.py
+        env:
+          DOCKER_IMAGE: tagbot
+          DOCKER_USERNAME: degraafc
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
