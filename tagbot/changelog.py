@@ -11,6 +11,7 @@ import toml
 from github import Github
 
 from . import env
+from .util import *
 
 # https://github.com/github-changelog-generator/github-changelog-generator/blob/v1.15.0/lib/github_changelog_generator/generator/section.rb#L88-L102
 ESCAPED = ["\\", "<", ">", "*", "_", "(", ")", "[", "]", "#"]
@@ -33,12 +34,16 @@ EXCLUDE_LABELS = [
 
 def get_changelog(version: str) -> Optional[str]:
     """Generate a changelog for the new version."""
+    debug("Looking up custom release notes")
     custom = get_custom_release_notes(version)
     if custom:
+        info("Found custom release notes")
         return custom
+    debug("Running changelog generator")
     output = run_generator()
     section = find_section(output, version)
     if not section:
+        warn(f"Changelog generation failed (couldn't find section for {version})")
         return None
     return format_section(section)
 
@@ -51,9 +56,14 @@ def get_custom_release_notes(version: str) -> Optional[str]:
     uuid = project["uuid"]
     owner, _ = env.REGISTRY.split("/")
     head = f"{owner}:registrator/{name.lower()}/{uuid[:8]}/v{version}"
-    gh = Github(env.TOKEN)
+    gh = client()
     r = gh.get_repo(env.REGISTRY)
-    [p] = r.get_pulls(head=head, state="closed")
+    ps = r.get_pulls(head=head, state="closed")
+    for p in ps:
+        break
+    else:
+        warn("No registry pull request was found for this version")
+        return None
     m = RE_CUSTOM.search(p.body)
     return "\n".join(l[2:] for l in m[1].splitlines()).strip() if m else None
 
@@ -62,6 +72,7 @@ def run_generator() -> str:
     """Run the generator CLI."""
     user, project = env.REPO.split("/")
     args = ["--user", user, "--project", project, "--token", env.TOKEN]
+    args.extend(["--github-site", env.GITHUB_SITE, "--github-api", env.GITHUB_API])
     _, output = tempfile.mkstemp()
     args.extend(["--output", output])
     args.extend(["--header-label", ""])

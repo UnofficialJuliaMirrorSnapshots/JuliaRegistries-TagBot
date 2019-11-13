@@ -5,10 +5,15 @@ inputs:
   token:
     description: GitHub API token
     required: true
+  github-site:
+    description: Base URL of the GitHub instance
+    required: false
+  github-api:
+    description: Base URL of the GitHub instance's API
+    required: false
   registry:
     description: Owner/name of the registry repository
     required: false
-    default: JuliaRegistries/General
   gpg-key:
     description: GPG key for tag signing
     required: false
